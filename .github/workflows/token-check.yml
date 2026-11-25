@@ -1,0 +1,33 @@
+name: Token check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+      MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+
+    steps:
+      - name: Check token
+        run: |
+          [ -n "$MODRINTH_TOKEN" ] || { echo "::error::missing MODRINTH_TOKEN secret"; exit 1; }
+          [ -n "$MODRINTH_ID" ] || { echo "::error::missing MODRINTH_ID variable"; exit 1; }
+          # fileless version gets rejected after auth, so nothing is created
+          jq -n --arg id "$MODRINTH_ID" \
+            '{project_id: $id, name: "check", version_number: "0.0.0-check", changelog: "",
+              game_versions: ["1.21.1"], loaders: ["neoforge"], version_type: "alpha",
+              dependencies: [], featured: false, file_parts: []}' > data.json
+          code=$(curl -sS -o resp.json -w '%{http_code}' -X POST https://api.modrinth.com/v2/version \
+            -H "Authorization: $MODRINTH_TOKEN" \
+            -H "User-Agent: token-check" \
+            -F "data=<data.json;type=application/json")
+          cat resp.json; echo
+          case "$code" in
+            401|403) echo "::error::token rejected ($code)"; exit 1 ;;
+            400) echo "token ok" ;;
+            *) echo "::error::unexpected $code"; exit 1 ;;
+          esac
