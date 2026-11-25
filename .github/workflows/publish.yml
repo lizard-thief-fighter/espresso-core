@@ -1,0 +1,67 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+      MODRINTH_ID: ${{ vars.MODRINTH_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check setup
+        run: |
+          [ -n "$MODRINTH_TOKEN" ] || { echo "::error::missing MODRINTH_TOKEN secret"; exit 1; }
+          [ -n "$MODRINTH_ID" ] || { echo "::error::missing MODRINTH_ID variable"; exit 1; }
+          v="${GITHUB_REF_NAME#v}"
+          mv=$(sed -n 's/^mod_version=//p' gradle.properties | tr -d '\r')
+          [ "$v" = "$mv" ] || { echo "::error::tag $GITHUB_REF_NAME doesnt match mod_version $mv"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "MOD_ID=$(sed -n 's/^mod_id=//p' gradle.properties | tr -d '\r')" >> "$GITHUB_ENV"
+          echo "MC=$(sed -n 's/^minecraft_version=//p' gradle.properties | tr -d '\r')" >> "$GITHUB_ENV"
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build mod
+        run: gradle build --no-daemon
+
+      - name: Get changelog
+        run: |
+          awk -v v="$VERSION" '
+            /^## / { on = ($2 == v); next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::no CHANGELOG.md section for $VERSION"; exit 1; }
+
+      - name: Upload to Modrinth
+        run: |
+          jar="build/libs/${MOD_ID}-${VERSION}.jar"
+          [ -f "$jar" ] || { echo "::error::$jar not built"; exit 1; }
+          jq -n \
+            --arg id "$MODRINTH_ID" --arg v "$VERSION" --arg mc "$MC" \
+            --rawfile notes notes.md \
+            '{project_id: $id, name: $v, version_number: $v, changelog: $notes,
+              game_versions: [$mc], loaders: ["neoforge"], version_type: "beta",
+              dependencies: [], featured: true, status: "listed", file_parts: ["file"]}' > data.json
+          curl -sS --fail-with-body -X POST https://api.modrinth.com/v2/version \
+            -H "Authorization: $MODRINTH_TOKEN" \
+            -H "User-Agent: ${MOD_ID}-publish" \
+            -F "data=<data.json;type=application/json" \
+            -F "file=@${jar};type=application/java-archive"
